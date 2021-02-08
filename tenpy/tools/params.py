@@ -2,7 +2,7 @@
 
 See the doc-string of :class:`Config` for details.
 """
-# Copyright 2018-2020 TeNPy Developers, GNU GPLv3
+# Copyright 2018-2021 TeNPy Developers, GNU GPLv3
 
 import warnings
 import numpy as np
@@ -10,7 +10,7 @@ from collections.abc import MutableMapping
 import pprint
 import os
 
-from .hdf5_io import Hdf5Exportable, ATTR_FORMAT
+from .hdf5_io import ATTR_FORMAT
 
 __all__ = ["Config", "asConfig", "get_parameter", "unused_parameters"]
 
@@ -250,6 +250,15 @@ class Config(MutableMapping):
         self.unused.discard(key)  # (does nothing if key not in set)
         return val
 
+    def silent_get(self, key, default):
+        """Find the value of `key`, but don't set as default value and don't print.
+
+        Same as ``dict.get``, i.e. just return `self[key]` if existent, else `default`, without
+        memorizing/printing the access.
+        Does not count as read-out for the :attr:`unused` parameters.
+        """
+        return self.options.get(key, default)
+
     def setdefault(self, key, default):
         """Set a default value without reading it out.
 
@@ -283,6 +292,17 @@ class Config(MutableMapping):
         self.print_if_verbose(key, "Subconfig", use_default)
         self.unused.discard(key)  # (does nothing if key not in set)
         return subconfig
+
+    def touch(self, *keys):
+        """Mark `keys` as read out to supress warnings about those keys being unused.
+
+        Parameters
+        ----------
+        *keys : str
+            Each key is marked as read out.
+        """
+        for key in keys:
+            self.unused.discard(key)  # (does nothing if key not in set)
 
     def print_if_verbose(self, option, action=None, use_default=False):
         """Print out `option` if verbosity and other conditions are met.
@@ -449,7 +469,7 @@ def get_parameter(params, key, default, descr, asarray=False):
     Examples
     --------
     In the algorithm
-    :class:`~tenpy.algorithms.tebd.Engine` gets a dictionary of parameters.
+    :class:`~tenpy.algorithms.tebd.TEBDEngine` gets a dictionary of parameters.
     Beside doing other stuff, it calls :meth:`tenpy.models.model.NearestNeighborModel.calc_U_bond`
     with the dictionary as argument, which looks similar like:
 

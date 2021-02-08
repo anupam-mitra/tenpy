@@ -1,5 +1,5 @@
-Tensor Network Python (TeNPy)
-=============================
+TeNPy: Tensor Network Python
+----------------------------
 
 .. image:: https://img.shields.io/github/last-commit/tenpy/tenpy
     :alt: GitHub last commit

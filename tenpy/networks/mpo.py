@@ -34,7 +34,7 @@ We store these indices in `IdL` and `IdR` (if there are such indices).
 Similar as for the MPS, a bond index ``i`` is *left* of site `i`,
 i.e. between sites ``i-1`` and ``i``.
 """
-# Copyright 2018-2020 TeNPy Developers, GNU GPLv3
+# Copyright 2018-2021 TeNPy Developers, GNU GPLv3
 
 import numpy as np
 from scipy.linalg import expm
@@ -640,7 +640,7 @@ class MPO:
         LP = npc.tensordot(LP, self._W[0], axes=[['wR', 'p0'], ['wL', 'p*']])
         LP = npc.tensordot(LP, theta.conj(), axes=[['vR*', 'p'], ['vL*', 'p0*']])
 
-        for i in range(1, max_range * L):
+        for i in range(1, max(max_range, 1) * L):
             i0 = i % L
             W = self._W[i0]
             if i >= L:
@@ -654,7 +654,7 @@ class MPO:
             LP = npc.tensordot(LP, W, axes=[['wR', 'p'], ['wL', 'p*']])
             LP = npc.tensordot(LP, B.conj(), axes=[['vR*', 'p'], ['vL*', 'p*']])
 
-            if i >= L:
+            if i >= L - 1:
                 RP = env.init_RP(i)
                 current_value = npc.inner(LP,
                                           RP,

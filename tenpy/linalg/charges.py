@@ -19,7 +19,7 @@ For further details, see the definition of :func:`~tenpy.tools.optimization.use_
 
 .. autodata:: QTYPE
 """
-# Copyright 2018-2020 TeNPy Developers, GNU GPLv3
+# Copyright 2018-2021 TeNPy Developers, GNU GPLv3
 
 import numpy as np
 import copy
@@ -289,6 +289,8 @@ class ChargeInfo:
         """Compare self.mod and self.names for equality, ignore missing names."""
         if self is other:
             return True
+        if self.qnumber != other.qnumber:
+            return False
         if not np.all(self.mod == other.mod):
             return False
         for l, r in zip(self.names, other.names):

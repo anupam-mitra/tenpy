@@ -6,11 +6,12 @@ the idea is more to serve as a pedagogical example for a 'model'.
 
 We choose the field along z to allow to conserve the parity, if desired.
 """
-# Copyright 2018-2020 TeNPy Developers, GNU GPLv3
+# Copyright 2018-2021 TeNPy Developers, GNU GPLv3
 
 import numpy as np
 
 from .model import CouplingMPOModel, NearestNeighborModel
+from .lattice import Chain
 from ..tools.params import asConfig
 from ..networks.site import SpinHalfSite
 
@@ -72,7 +73,5 @@ class TFIChain(TFIModel, NearestNeighborModel):
 
     See the :class:`TFIModel` for the documentation of parameters.
     """
-    def __init__(self, model_params):
-        model_params = asConfig(model_params, self.__class__.__name__)
-        model_params.setdefault('lattice', "Chain")
-        CouplingMPOModel.__init__(self, model_params)
+    default_lattice = Chain
+    force_default_lattice = True

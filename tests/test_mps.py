@@ -1,11 +1,11 @@
 """A collection of tests for :module:`tenpy.networks.mps`."""
-# Copyright 2018-2020 TeNPy Developers, GNU GPLv3
+# Copyright 2018-2021 TeNPy Developers, GNU GPLv3
 
 import numpy as np
 import numpy.testing as npt
 import warnings
 from tenpy.models.xxz_chain import XXZChain
-from tenpy.models.lattice import Square
+from tenpy.models.lattice import Square, Chain, Honeycomb
 
 from tenpy.networks import mps, site
 from tenpy.networks.terms import TermList
@@ -178,6 +178,17 @@ def test_charge_fluctuations():
 
 def test_mps_swap():
     L = 6
+    # starting from ordered pairs with infinite bc (the latter shouldn't make a difference).
+    pairs = [(0, 1), (2, 3), (4, 5)]
+    perm = rand_permutation(L)
+    pairs_perm = [(perm[i], perm[j]) for i, j in pairs]
+    psi = mps.MPS.from_singlets(spin_half, L, pairs, bc='infinite')
+    psi.permute_sites(perm, verbose=2)
+    psi_perm = mps.MPS.from_singlets(spin_half, L, pairs_perm, bc='finite')
+    print(psi.overlap(psi_perm), psi.norm_test())
+    assert abs(abs(psi.overlap(psi_perm)) - 1.) < 1.e-10
+
+    # now start from random pairs
     pairs = [(0, 3), (1, 5), (2, 4)]
     pairs_swap = [(0, 2), (1, 5), (3, 4)]
     print("singlet pairs: ", pairs)
@@ -445,6 +456,47 @@ def test_mps_compress(method, eps=1.e-13):
     psiSum2.test_sanity()
     assert (np.abs(psiSum2.overlap(psi) - .5) < 1e-13)
     assert (np.abs(psiSum2.overlap(psiOrth) - .5) < 1e-13)
+
+
+def test_InitialStateBuilder():
+    s0 = site.SpinHalfSite()
+    lat = Chain(10, s0, bc_MPS='finite')
+    psi1 = mps.InitialStateBuilder(
+        lat, {
+            'method': 'lat_product_state',
+            'product_state': [['up'], ['down']],
+            'check_filling': 0.5,
+            'full_empty': ['up', 'down'],
+        }).run()
+    psi1.test_sanity()
+    psi2 = mps.InitialStateBuilder(
+        lat, {
+            'method': 'mps_product_state',
+            'product_state': ['up', 'down'] * 5,
+            'check_filling': 0.5,
+            'full_empty': ['up', 'down'],
+        }).run()
+    psi2.test_sanity()
+    assert abs(psi1.overlap(psi2) - 1) < 1.e-14
+    psi3 = mps.InitialStateBuilder(
+        lat, {
+            'method': 'fill_where',
+            'full_empty': ('up', 'down'),
+            'fill_where': "x_ind % 2 == 0",
+            'check_filling': 0.5,
+            'full_empty': ['up', 'down'],
+        }).run()
+    psi3.test_sanity()
+    assert abs(psi1.overlap(psi3) - 1) < 1.e-14
+    psi4 = mps.InitialStateBuilder(
+        lat, {
+            'method': 'randomized',
+            'randomized_from_method': 'lat_product_state',
+            'product_state': [['up'], ['down']],
+            'check_filling': 0.5,
+            'full_empty': ['up', 'down'],
+        }).run()
+    assert abs(psi4.overlap(psi1)) < 0.1  # randomizing should definitely lead to small overlap!
 
 
 if __name__ == "__main__":

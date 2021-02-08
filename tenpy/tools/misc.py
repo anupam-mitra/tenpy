@@ -1,5 +1,5 @@
 """Miscellaneous tools, somewhat random mix yet often helpful."""
-# Copyright 2018-2020 TeNPy Developers, GNU GPLv3
+# Copyright 2018-2021 TeNPy Developers, GNU GPLv3
 
 import numpy as np
 from .optimization import bottleneck
@@ -15,6 +15,7 @@ __all__ = [
     'to_iterable', 'to_iterable_of_len', 'to_array', 'anynan', 'argsort', 'lexsort',
     'inverse_permutation', 'list_to_dict_list', 'atleast_2d_pad', 'transpose_list_list',
     'zero_if_close', 'pad', 'any_nonzero', 'add_with_None_0', 'chi_list', 'group_by_degeneracy',
+    'get_close', 'find_subclass', 'get_recursive', 'set_recursive', 'flatten',
     'build_initial_state', 'setup_executable'
 ]
 
@@ -48,7 +49,7 @@ def to_iterable_of_len(a, L):
     return a
 
 
-def to_array(a, shape=(None, )):
+def to_array(a, shape=(None, ), dtype=None):
     """Convert `a` to an numpy array and tile to matching dimension/shape.
 
     This function provides similar functionality as numpys broadcast, but not quite the same:
@@ -64,13 +65,15 @@ def to_array(a, shape=(None, )):
     shape : tuple of {None | int}
         The desired shape of the array. An entry ``None`` indicates arbitrary len >=1.
         For int entries, tile the array periodically to fit the len.
+    dtype :
+        Optionally specifies the data type.
 
     Returns
     -------
     a_array : ndarray
         A copy of `a` converted to a numpy ndarray of desired dimension and shape.
     """
-    a = np.array(a)  # copy
+    a = np.array(a, dtype=dtype)  # copy
     if a.ndim != len(shape):
         if a.size == 1:
             a = np.reshape(a, [1] * len(shape))
@@ -477,9 +480,157 @@ def group_by_degeneracy(E, *args, subset=None, cutoff=1.e-12):
     return groups
 
 
+def get_close(values, target, default=None, eps=1.e-13):
+    """Iterate through `values` and return first entry closer than `eps`.
+
+    Parameters
+    ----------
+    values : interable of float
+        Values to compare to.
+    target : float
+        Value to find.
+    default :
+        Returned if no value close to `target` is found.
+    eps : float
+        Tolerance what counts as "close", namely everything with ``abs(val-target) < eps``.
+
+    Returns
+    -------
+    value : float
+        An entry of `values`, if one close to `target` is found, otherwise `default`.
+    """
+    for v in values:
+        if abs(v - target) < eps:
+            return v
+    return default
+
+
+def find_subclass(base_class, subclass_name):
+    """For a given base class, recursively find the subclass with the given name.
+
+    Parameters
+    ----------
+    base_class : class
+        The base class of which `subclass_name` is supposed to be a subclass.
+    subclass_name : str
+        Name of the class to be found.
+
+    Returns
+    -------
+    subclass : None | class
+        Class with name `subclass_name` which is a subclass of the `base_class`.
+        None, if no subclass of the given name is found.
+    """
+    if base_class.__name__ == subclass_name:
+        return base_class
+    subclasses = base_class.__subclasses__()
+    for subcls in subclasses:
+        if subcls.__name__ == subclass_name:
+            return subcls
+    for subcls in subclasses:
+        found = find_subclass(subcls, subclass_name)  # recursion
+        if found is not None:
+            return found
+    return None
+
+
+def get_recursive(nested_data, recursive_key, separator="/"):
+    """Extract specific value from a nested data structure.
+
+    Parameters
+    ----------
+    nested_data : dict of dict (-like)
+        Some nested data structure supporting a dict-like interface.
+    recursive_key : str
+        The key(-parts) to be extracted, separated by `separator`.
+        A leading `separator` is ignored.
+    separator : str
+        Separator for splitting `recursive_key` into subkeys.
+
+    Returns
+    -------
+    entry :
+        For example, ``recursive_key="/some/sub/key"`` will result in extracing
+        ``nested_data["some"]["sub"]["key"]``.
+
+    See also
+    --------
+    set_recursive : same for changing/setting a value.
+    flatten : Get a completely flat structure.
+    """
+    if recursive_key.startswith(separator):
+        recursive_key = recursive_key[len(separator):]
+    if not recursive_key:
+        return nested_data  # return the original data if recursive_key is just "/"
+    for subkey in recursive_key.split(separator):
+        nested_data = nested_data[subkey]
+    return nested_data
+
+
+def set_recursive(nested_data, recursive_key, value, separator="/", insert_dicts=False):
+    """Same as :func:`get_recursive`, but set the data entry to `value`."""
+    if recursive_key.startswith(separator):
+        recursive_key = recursive_key[len(separator):]
+    subkeys = recursive_key.split(separator)
+    for subkey in subkeys[:-1]:
+        if insert_dicts and subkey not in nested_data:
+            nested_data[subkey]
+        nested_data = nested_data[subkey]
+    nested_data[subkeys[-1]] = value
+
+
+def flatten(mapping, separator='/'):
+    """Obtain a flat dictionary with all key/value pairs of a nested data structure.
+
+    Parameters
+    ----------
+    separator : str
+        Separator for merging keys to a single string.
+
+    Returns
+    -------
+    flat_config : dict
+        A single dictionary with all key-value pairs.
+
+    Examples
+    --------
+    .. testsetup ::
+
+        from tenpy.tools.misc import *
+
+    >>> sample_data = {'some': {'nested': {'entry': 100, 'structure': 200},
+    ...                         'subkey': 10},
+    ...                'topentry': 1}
+    >>> flat = flatten(sample_data)
+    >>> for k in sorted(flat):
+    ...     print(repr(k), ':', flat[k])
+    'some/nested/entry' : 100
+    'some/nested/structure' : 200
+    'some/subkey' : 10
+    'topentry' : 1
+
+
+    See also
+    --------
+    get_recursive : Useful to obtain a single entry from a nested data structure.
+    """
+    if isinstance(mapping, Config):
+        mapping = mapping.as_dict()
+    result = {}  #mapping.copy()
+    for k1, v1 in mapping.items():
+        if isinstance(v1, dict):
+            flat_submapping = flatten(v1, separator)
+            for k2, v2 in flat_submapping.items():
+                new_key = separator.join((k1, k2))
+                result[new_key] = v2
+        else:
+            result[k1] = v1
+    return result
+
+
 def build_initial_state(size, states, filling, mode='random', seed=None):
     warnings.warn(
-        "Deprecated: moved `build_initial_state` to `tenpy.networks.mps.build_initial_state`.",
+        "Deprecated `build_initial_state`: Use `tenpy.networks.mps.InitialStateBuilder` instead.",
         category=FutureWarning,
         stacklevel=2)
     from tenpy.networks import mps
@@ -488,6 +639,11 @@ def build_initial_state(size, states, filling, mode='random', seed=None):
 
 def setup_executable(mod, run_defaults, identifier_list=None):
     """Read command line arguments and turn into useable dicts.
+
+    .. warning ::
+
+        this is a deprecated interface. Use the :class:`~tenpy.simulations.simulation.Simulation`
+        interface in combination with :func:`~tenpy.
 
     Uses default values defined at:
     - model class for model_par
@@ -501,20 +657,25 @@ def setup_executable(mod, run_defaults, identifier_list=None):
             - identifier, a static (class level) list or other iterable with the names of the parameters
               to be used in filename identifiers.
 
-    Args:
-        mod (model | dict): Model class (or instance) OR a dictionary containing model defaults
-        run_defaults (dict): default values for executable file parameters
-        identifier_list (ieterable, optional) | Used only if mod is a dict. Contains the identifier
-                                                                                    variables
+    Parameters
+    ----------
+    mod : model | dict
+        Model class (or instance) OR a dictionary containing model defaults
+    run_defaults : dict
+        default values for executable file parameters
+    identifier_list : ieterable
+        Used only if mod is a dict. Contains the identifier variables
 
-    Returns:
-        model_par, sim_par, run_par (dicts) : containing all parameters.
-        args | namespace with raw arguments for some backwards compatibility with executables.
+    Returns
+    -------
+    model_par, sim_par, run_par : dict
+        containing all parameters.
+    args :
+        namespace with raw arguments for some backwards compatibility with executables.
     """
-    warnings.warn(
-        "Deprecated: `setup_executable` is not configured and too specific for this version of tenpy.",
-        category=FutureWarning,
-        stacklevel=2)
+    warnings.warn("Deprecated: use `tenpy.run_simulation` and `tenpy.console_main` instead.",
+                  category=FutureWarning,
+                  stacklevel=2)
     parser = argparse.ArgumentParser()
 
     # These deal with backwards compatibility (supplying a model)

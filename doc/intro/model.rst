@@ -78,10 +78,10 @@ The full Hilbert space is a tensor product of the local Hilbert space on each si
 
     The :class:`~tenpy.linalg.charges.LegCharge` of all involved sites need to have a common
     :class:`~tenpy.linalg.np_conserved.ChargeInfo` in order to allow the contraction of tensors acting on the various sites.
-    This can be ensured with the function :func:`~tenpy.networks.site.multi_sites_combine_charges`.
+    This can be ensured with the function :func:`~tenpy.networks.site.set_common_charges`.
 
 
-An example where :func:`~tenpy.networks.site.multi_sites_combine_charges` is needed would be a coupling of different
+An example where :func:`~tenpy.networks.site.set_common_charges` is needed would be a coupling of different
 types of sites, e.g., when a tight binding chain of fermions is coupled to some local spin degrees of freedom.
 Another use case of this function would be a model with a $U(1)$ symmetry involving only half the sites, say :math:`\sum_{i=0}^{L/2} n_{2i}`.
 
@@ -301,10 +301,12 @@ Some random remarks on models
 - Of course, an MPO is all you need to initialize a :class:`~tenpy.models.model.MPOModel` to be used for DMRG; you don't have to use the :class:`~tenpy.models.model.CouplingModel`
   or :class:`~tenpy.models.model.CouplingMPOModel`.
   For example an exponentially decaying long-range interactions are not supported by the coupling model but straight-forward to include to an MPO, as demonstrated in the example ``examples/mpo_exponentially_decaying.py``.
+- If you want to debug or double check that the you added the correct terms to a :class:`~tenpy.models.model.CouplingMPOModel`,
+  you can print the terms with ``print(M.all_coupling_terms().to_TermList())``. This will 
 - If the model of your interest contains Fermions, you should read the :doc:`/intro/JordanWigner`.
 - We suggest writing the model to take a single parameter dictionary for the initialization,
   as the :class:`~tenpy.models.model.CouplingMPOModel` does.
-  The CouplingMPOModel converts the dictionary to a dict-like 
+  The :class:`~tenpy.models.model.CouplingMPOModel` converts the dictionary to a dict-like 
   :class:`~tenpy.tools.params.Config` with some additional features before passing it on to the `init_lattice`,
   `init_site`, ... methods.
   It is recommended to read out providing default values with ``model_params.get("key", default_value)``, 

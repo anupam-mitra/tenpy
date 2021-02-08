@@ -27,12 +27,13 @@ as base class in (most of) the predefined models in TeNPy.
 
 See also the introduction in :doc:`/intro/model`.
 """
-# Copyright 2018-2020 TeNPy Developers, GNU GPLv3
+# Copyright 2018-2021 TeNPy Developers, GNU GPLv3
 
 import numpy as np
 import warnings
+import inspect
 
-from .lattice import get_lattice, Lattice, TrivialLattice
+from .lattice import get_lattice, Lattice, TrivialLattice, Chain
 from ..linalg import np_conserved as npc
 from ..linalg.charges import QTYPE, LegCharge
 from ..tools.misc import to_array, add_with_None_0
@@ -66,6 +67,8 @@ class Model(Hdf5Exportable):
     ----------
     lat : :class:`~tenpy.model.lattice.Lattice`
         The lattice defining the geometry and the local Hilbert space(s).
+    dtype : :class:`~numpy.dtype`
+        The data type of the Hamiltonian
     """
     def __init__(self, lattice):
         # NOTE: every subclass like CouplingModel, MPOModel, NearestNeighborModel calls this
@@ -74,6 +77,7 @@ class Model(Hdf5Exportable):
         if not hasattr(self, 'lat'):
             # first call: initialize everything
             self.lat = lattice
+            self.dtype = None
         else:
             # Model.__init__() got called before
             if self.lat is not lattice:  # expect the *same instance*!
@@ -161,6 +165,12 @@ class NearestNeighborModel(Model):
     def __init__(self, lattice, H_bond):
         Model.__init__(self, lattice)
         self.H_bond = list(H_bond)
+        for Hb in H_bond:
+            if Hb is not None:
+                self.dtype = Hb.dtype
+                break
+        else:
+            raise ValueError("All H_bond are `None`!")
         if self.lat.bc_MPS != 'infinite':
             assert self.H_bond[0] is None
         NearestNeighborModel.test_sanity(self)
@@ -449,9 +459,6 @@ class MPOModel(Model):
     In this class, the Hamiltonian gets represented by an :class:`~tenpy.networks.mpo.MPO`.
     Thus, instances of this class are suitable for MPO-based algorithms like DMRG
     :mod:`~tenpy.algorithms.dmrg` and MPO time evolution.
-
-    .. todo ::
-        implement MPO for time evolution...
 
     Parameters
     ----------
@@ -956,7 +963,7 @@ class CouplingModel(Model):
         --------
         add_onsite : Add terms acting on one site only.
         add_multi_coupling_term : for terms on more than two sites.
-        add_coupling_term : Add a single term without summing over :math:`vec{x}`.
+        add_coupling_term : Add a single term without summing over :math:`\vec{x}`.
         """
         dx = np.array(dx, np.intp).reshape([self.lat.dim])
         if not np.any(np.asarray(strength) != 0.):
@@ -1652,11 +1659,20 @@ class CouplingMPOModel(CouplingModel, MPOModel):
     ----------
     name : str
         The (class-) name of the model, e.g. ``"XXZChain" or ``"SpinModel"``.
-    options: :class:`~tenpy.tools.params.Config`
+    options : :class:`~tenpy.tools.params.Config`
         Optional parameters.
     verbose : int
         Level of verbosity (i.e. how much status information to print); higher=more output.
+    default_lattice : :class:`~tenpy.models.lattice.Lattice`
+        Class attribute. The default class to be used in :meth:`init_lattice`.
+    force_default_lattice : bool
+        Class attribute. If True, :meth:`init_lattice` asserts that the initialized lattice is
+        (a subclass of) `default_lattice`.
     """
+
+    default_lattice = Chain
+    force_default_lattice = False
+
     def __init__(self, model_params):
         if getattr(self, "_called_CouplingMPOModel_init", False):
             # If we ignore this, the same terms get added to self multiple times.
@@ -1710,9 +1726,10 @@ class CouplingMPOModel(CouplingModel, MPOModel):
         -------
         .. cfg:configoptions :: CouplingMPOModel
 
-            lattice : str | Lattice
+            lattice : str | :class:`Lattice`
                 The name of a lattice pre-defined in TeNPy to be initialized.
-                Alternatively, a (possibly self-defined) Lattice instance.
+                Alternatively, directly a subclass of :class:`Lattice` instead of the name.
+                Alternatively, a (possibly self-defined) :class:`Lattice` instance.
                 In the latter case, no further parameters are read out.
             bc_MPS : str
                 Boundary conditions for the MPS.
@@ -1744,9 +1761,16 @@ class CouplingMPOModel(CouplingModel, MPOModel):
                 couplings between the first and last sites of the MPS!)
 
         """
-        lat = model_params.get('lattice', "Chain")
+        lat = model_params.get('lattice', self.default_lattice)
         if isinstance(lat, str):
             LatticeClass = get_lattice(lattice_name=lat)
+            lat = None
+        elif inspect.isclass(lat) and issubclass(lat, Lattice):
+            LatticeClass = lat
+            lat = None
+        elif not isinstance(lat, Lattice):
+            raise ValueError("invalid type for model_params['lattice'], got " + repr(lat))
+        if lat is None:  # only provided LatticeClass
             bc_MPS = model_params.get('bc_MPS', 'finite')
             order = model_params.get('order', 'default')
             sites = self.init_sites(model_params)
@@ -1768,9 +1792,14 @@ class CouplingMPOModel(CouplingModel, MPOModel):
             else:
                 raise ValueError("Can't auto-determine parameters for the lattice. "
                                  "Overwrite the `init_lattice` in your model!")
-            # now, `lat` is an instance of the LatticeClass called `lattice_name`.
         # else: a lattice was already provided
+        # now, `lat` is an instance of the LatticeClass
         assert isinstance(lat, Lattice)
+        if self.force_default_lattice:
+            DefaultLattice = self.default_lattice
+            if isinstance(DefaultLattice, str):
+                DefaultLattice = get_lattice(DefaultLattice)
+            assert isinstance(lat, DefaultLattice)
         return lat
 
     def init_sites(self, model_params):
