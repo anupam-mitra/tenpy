@@ -43,7 +43,7 @@ class TermList(Hdf5Exportable):
         of an operator name and a site `i` it acts on.
         For Fermions, the order is the order in the mathematic sense, i.e., the right-most/last
         operator in the list acts last.
-    strengths : (list of) float/complex
+    strength : (list of) float/complex
         For each term in `terms` an associated prefactor or strength.
         A single number holds for all terms equally.
 
@@ -52,7 +52,7 @@ class TermList(Hdf5Exportable):
     terms : list of list of (str, int)
         List of terms where each `term` is a tuple ``(opname, i)`` of an operator name and a site
         `i` it acts on.
-    strengths : 1D ndarray
+    strength : 1D ndarray
         For each term in `terms` an associated prefactor or strength.
 
     Examples
@@ -215,6 +215,18 @@ class TermList(Hdf5Exportable):
             self.terms[idx], overall_sign = order_combine_term(term, sites)
             self.strength[idx] *= overall_sign
         # TODO: could sort terms and combine duplicates
+
+    def limits(self):
+        """Return the left-most site and right-most site any operator acts on."""
+        all_i = []
+        for term in self.terms:
+            all_i.extend([i for _, i in term])
+        return min(all_i), max(all_i)
+
+    def shift(self, i0):
+        """Return a copy where `i0` is added to all indices `i` in :attr:`terms`."""
+        shifted_terms = [[(op, i + i0) for op, i in term] for term in self.terms]
+        return TermList(shifted_terms, self.strength)
 
 
 def order_combine_term(term, sites):
@@ -517,15 +529,15 @@ class CouplingTerms(Hdf5Exportable):
         d3[op_j] = d3.get(op_j, 0) + strength
 
     def coupling_term_handle_JW(self, strength, term, sites, op_string=None):
-        """Helping function to call before :meth:`add_multi_coupling_term`.
+        """Helping function to call before :meth:`add_coupling_term`.
 
         Parameters
         ----------
         strength : float
             The strength of the coupling term.
         term : [(str, int), (str, int)]
-            List of two tuples ``(op, i)`` where `i` is the MPS index of the site the operator
-            named `op` acts on.
+            List of two tuples ``[(op_i, i), (op_j, j)]`` where `i` is the MPS index of the site
+            the operator named `op_i` acts on; we require `i < j`.
         sites : list of :class:`~tenpy.networks.site.Site`
             Defines the local Hilbert space for each site.
             Used to check whether the operators need Jordan-Wigner strings.

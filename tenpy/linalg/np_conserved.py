@@ -283,8 +283,6 @@ class Array:
             cp._qdata = self._qdata.copy('C')
             cp.qtotal = self.qtotal.copy()
             # even deep copies share legs & chinfo (!)
-        else:
-            cp._data = self._data[:]
         return cp
 
     def __getstate__(self):
@@ -832,7 +830,7 @@ class Array:
         nblocks = self.stored_blocks
         stored = self.size
         nonzero = np.sum([np.count_nonzero(t) for t in self._data], dtype=np.int_)
-        bs = np.array([t.size for t in self._data], dtype=np.float)
+        bs = np.array([t.size for t in self._data], dtype=float)
         if nblocks > 0:
             captsparse = float(nonzero) / stored
             bs_min = int(np.min(bs))
@@ -1248,7 +1246,7 @@ class Array:
             for block, slices, _, _ in self:
                 leg_slices = []
                 for leg, sl in zip(add_legs, slices):
-                    mask = np.zeros(leg.ind_len, np.bool)
+                    mask = np.zeros(leg.ind_len, np.bool_)
                     mask[sl] = True
                     leg_slices.append(leg.project(mask)[2])
                 qtotal = detect_qtotal(self.to_ndarray(), leg_slices)
@@ -3029,7 +3027,7 @@ def grid_concat(grid, axes, copy=True):
     --------
     Array.sort_legcharge : can be used to block by charges.
     """
-    grid = np.asarray(grid, dtype=np.object)
+    grid = np.asarray(grid, dtype=object)
     if grid.ndim < 1 or grid.ndim != len(axes):
         raise ValueError("grid has wrong dimension")
     if grid.ndim == 1:
@@ -3415,7 +3413,7 @@ def inner(a, b, axes=None, do_conj=False):
         up to a possible transposition, which is then reverted.
     do_conj : bool
         If ``False`` (Default), ignore it.
-        if ``True``, conjugate `a` before, i.e., return ``inner(a.conj(), b, axes)``
+        If ``True``, conjugate `a` before, i.e., return ``inner(a.conj(), b, axes)``.
 
     Returns
     -------
@@ -3719,9 +3717,9 @@ def eigh(a, UPLO='L', sort=None):
     -----
     Requires the legs to be contractible.
     If `a` is not blocked by charge, a blocked copy is made via a permutation ``P``,
-    :math:` a' =  P a P = V' W' (V')^{\dagger}`.
+    :math:`a' =  P a P^{-1} = V' W' (V')^{\dagger}`.
     The eigenvectors `V` are then obtained by the reverse permutation,
-    :math:`V = P^{-1} V'` such that `A = V W V^{\dagger}`.
+    :math:`V = P^{-1} V'` such that :math:`a = V W V^{\dagger}`.
     """
     w, v = _eig_worker(True, a, sort, UPLO)  # hermitian
     v.iset_leg_labels([a._labels[0], 'eig'])
@@ -3753,9 +3751,9 @@ def eig(a, sort=None):
     -----
     Requires the legs to be contractible.
     If `a` is not blocked by charge, a blocked copy is made via a permutation ``P``,
-    :math:` a' =  P a P = V' W' (V')^{\dagger}`.
+    :math:`a' =  P a P^{-1} = V' W' (V')^{\dagger}`.
     The eigenvectors `V` are then obtained by the reverse permutation,
-    :math:`V = P^{-1} V'` such that `A = V W V^{\dagger}`.
+    :math:`V = P^{-1} V'` such that :math:`a = V W V^{\dagger}`.
     """
     w, v = _eig_worker(False, a, sort)  # non-hermitian
     v.iset_leg_labels([a._labels[0], 'eig'])
@@ -4198,7 +4196,7 @@ def _split_legs_worker(self, split_axes, cutoff):
 
 def _nontrivial_grid_entries(grid):
     """Return a list [(idx, entry)] of non-``None`` entries in an array_like grid."""
-    grid = np.asarray(grid, dtype=np.object)
+    grid = np.asarray(grid, dtype=object)
     entries = [(idx, entry) for idx, entry in np.ndenumerate(grid) if entry is not None]
     if len(entries) == 0:
         raise ValueError("No non-trivial entries in grid")
@@ -4673,7 +4671,7 @@ def _eig_worker(hermitian, a, sort, UPLO='L'):
 
     piped_axes, a = a.as_completely_blocked()  # ensure complete blocking
 
-    dtype = np.float if hermitian else np.complex
+    dtype = np.float64 if hermitian else np.complex128
     resw = np.zeros(a.shape[0], dtype=dtype)
     resv = diag(1., a.legs[0], dtype=np.promote_types(dtype, a.dtype))
     # w, v now default to 0 and the Identity
@@ -4703,7 +4701,7 @@ def _eigvals_worker(hermitian, a, sort, UPLO='L'):
         raise ValueError("Non-trivial qtotal -> Nilpotent. Not diagonizable!?")
     piped_axes, a = a.as_completely_blocked()  # ensure complete blocking
 
-    dtype = np.float if hermitian else np.complex
+    dtype = np.float64 if hermitian else np.complex128
     resw = np.zeros(a.shape[0], dtype=dtype)
     # w now default to 0
     for qindices, block in zip(a._qdata, a._data):  # non-zero blocks on the diagonal

@@ -40,8 +40,12 @@ import numpy as np
 from scipy.linalg import expm
 import warnings
 import sys
+import copy
+import logging
+logger = logging.getLogger(__name__)
 
 from ..linalg import np_conserved as npc
+from ..linalg.sparse import FlatLinearOperator
 from .site import group_sites, Site
 from ..tools.string import vert_join
 from .mps import MPS as _MPS  # only for MPS._valid_bc
@@ -52,7 +56,9 @@ from ..tools.math import lcm
 from ..tools.params import asConfig
 from ..algorithms.truncation import TruncationError, svd_theta
 
-__all__ = ['MPO', 'make_W_II', 'MPOGraph', 'MPOEnvironment', 'grid_insert_ops']
+__all__ = [
+    'MPO', 'make_W_II', 'MPOGraph', 'MPOEnvironment', 'MPOTransferMatrix', 'grid_insert_ops'
+]
 
 
 class MPO:
@@ -131,6 +137,10 @@ class MPO:
         self.max_range = max_range
         self.explicit_plus_hc = explicit_plus_hc
         self.test_sanity()
+
+    def copy(self):
+        """Make a shallow copy of `self`."""
+        return copy.copy(self)
 
     def save_hdf5(self, hdf5_saver, h5gr, subpath):
         """Export `self` into a HDF5 file.
@@ -398,7 +408,7 @@ class MPO:
             grouped_sites = group_sites(self.sites, n, charges='same')
         else:
             assert grouped_sites[0].n_sites == n
-        if self.max_range is not None:
+        if self.max_range is not None and self.max_range != np.inf:
             min_n = max(min([gs.n_sites for gs in grouped_sites]), 1)
             self.max_range = int(np.ceil(self.max_range / min_n))
         Ws = []
@@ -422,6 +432,34 @@ class MPO:
         self._W = Ws
         self.sites = grouped_sites
         self.grouped = self.grouped * n
+
+    def extract_segment(self, first, last):
+        """Extract a segment from the MPO.
+
+        Parameters
+        ----------
+        first, last : int
+            The first and last site to *include* into the segment.
+
+        Returns
+        -------
+        cp : :class:`MPO`
+            A `copy` of self with "segment" boundary conditions.
+
+        See also
+        --------
+        tenpy.networks.mps.MPS.extract_segment : similar method for MPS.
+        """
+        L = self.L
+        sites = [self.sites[i % L] for i in range(first, last + 1)]
+        W = [self.get_W(i) for i in range(first, last + 1)]
+        IdL = [self.IdL[i % L] for i in range(first, last + 1)]
+        IdL.append(self.IdL[last % L + 1])
+        IdR = [self.IdR[i % L] for i in range(first, last + 1)]
+        IdR.append(self.IdR[last % L + 1])
+        cp = self.__class__(sites, W, 'segment', IdL, IdR, self.max_range, self.explicit_plus_hc)
+        cp.grouped = self.grouped
+        return cp
 
     def sort_legcharges(self):
         """Sort virtual legs by charges. In place.
@@ -589,7 +627,7 @@ class MPO:
             # TODO: could sort by charges.
             U.append(W_II)
         Id = [0] * (self.L + 1)
-        return MPO(self.sites, U, self.bc, Id, Id)
+        return MPO(self.sites, U, self.bc, Id, Id, max_range=self.max_range)
 
     def expectation_value(self, psi, tol=1.e-10, max_range=100):
         """Calculate ``<psi|self|psi>/<psi|psi>``.
@@ -620,8 +658,12 @@ class MPO:
             For an infinite MPS: the density per site.
         """
         if psi.finite:
-            return MPOEnvironment(psi, self, psi).full_contraction(0)
-        env = MPOEnvironment(psi, self, psi)
+            if psi.bc == 'segment':
+                warnings.warn("MPO.expectation_value(psi) with segment psi needs environments! "
+                              "Can only estimate value completely ignoring contributions "
+                              "across segment boundaries!")
+            return MPOEnvironment(psi, self, psi, start_env_sites=0).full_contraction(0)
+        env = MPOEnvironment(psi, self, psi, start_env_sites=0)
         L = self.L
         LP0 = env.init_LP(0)
         masks_L_no_IdL = []
@@ -667,6 +709,8 @@ class MPO:
         else:  # no break
             msg = "Tolerance {0:.2e} not reached within {1:d} sites".format(tol, max_range)
             warnings.warn(msg, stacklevel=2)
+        if self.explicit_plus_hc:
+            current_value += np.conj(current_value)
         return np.real_if_close(current_value / L)
 
     def variance(self, psi, exp_val=None):
@@ -693,7 +737,9 @@ class MPO:
         if self.L != psi.L:
             raise ValueError("expect same L")
         if psi._p_label != ['p']:
-            raise ValueError("not adjusted for non-standard MPS.")
+            raise NotImplementedError("not adjusted for non-standard MPS.")
+        if self.explicit_plus_hc:
+            raise NotImplementedError("not implemented for explicit_plus_hc flag")
         assert self.L >= 1
         if exp_val is None:
             exp_val = self.expectation_value(psi)
@@ -817,7 +863,7 @@ class MPO:
         options : dict
             See above.
         """
-        options = asConfig(options, "MPO_apply")
+        options = asConfig(options, "ApplyMPO")
         method = options['compression_method']
         trunc_params = options.subconfig('trunc_params')
         if method == 'SVD':
@@ -1008,7 +1054,7 @@ class MPO:
         if i < 0:
             i += self.L
         if i >= self.L or i < 0:
-            raise ValueError("i = {0:d} out of bounds for finite MPO".format(i))
+            raise KeyError("i = {0:d} out of bounds for finite MPO".format(i))
         return i
 
     @staticmethod
@@ -1016,14 +1062,13 @@ class MPO:
         """parse the IdL or IdR argument of __init__"""
         if Id is None:
             return [None] * (L + 1)
-        else:
-            try:
-                Id = list(Id)
-                if len(Id) != L + 1:
-                    raise ValueError("expected list with L+1={0:d} entries".format(L + 1))
-                return Id
-            except TypeError:
-                return [Id] * (L + 1)
+        try:
+            Id = list(Id)
+        except TypeError:
+            return [Id] * (L + 1)
+        if len(Id) != L + 1:
+            raise ValueError("expected list with L+1={0:d} entries".format(L + 1))
+        return Id
 
     def __add__(self, other):
         """Return an MPO representing `self + other`.
@@ -1585,29 +1630,35 @@ class MPOGraph:
         charges[0][states[0]['IdL']] = chinfo.make_valid(None)  # default charge = 0.
         if infinite:
             charges[-1] = charges[0]  # bond is identical
-
+        
         def travel_q_LR(i, keyL):
             """Transport charges from left to right through the MPO graph.
 
             Inspect graph edges on site `i` starting on the left with `keyL` and add charges
             for all connections to the right.
-            Recursively transport charges from there."""
-            l = states[i][keyL]
-            site = sites[i]
-            st_r = states[i + 1]
-            ch_r = charges[i + 1]
-            # charge rule: q_left - q_right + op_qtotal = Ws_qtotal
-            qL_Wq = charges[i][l] - Ws_qtotal[i]  # q_left - Ws_qtotal
-            edges = self.graph[i][keyL]
-            for keyR, ops in edges.items():
-                r = st_r[keyR]
-                qR = ch_r[r]
-                if qR is None:
-                    op_qtotal = site.get_op(ops[0][0]).qtotal
-                    ch_r[r] = qL_Wq + op_qtotal  # solve chargerule for q_right
-                    if infinite or i + 1 < L:
-                        travel_q_LR((i + 1) % L, keyR)
-
+            Originally we recursively transported charges from there, but now this is done
+            iteratively to avoid the maximum recursion limit in python for large systems."""
+            stack = []
+            stack.append((i, keyL))
+            while len(stack):
+                i, keyL = stack.pop(-1)  # We are replacing system stack with one of our own
+                l = states[i][keyL]
+                site = sites[i]
+                st_r = states[i + 1]
+                ch_r = charges[i + 1]
+                # charge rule: q_left - q_right + op_qtotal = Ws_qtotal
+                qL_Wq = charges[i][l] - Ws_qtotal[i]  # q_left - Ws_qtotal
+                edges = self.graph[i][keyL]
+                edge_stack = []
+                for keyR, ops in edges.items():
+                    r = st_r[keyR]
+                    qR = ch_r[r]
+                    if qR is None:
+                        op_qtotal = site.get_op(ops[0][0]).qtotal
+                        ch_r[r] = qL_Wq + op_qtotal  # solve chargerule for q_right
+                        if infinite or i + 1 < L:
+                            edge_stack.append(((i + 1) % L, keyR))
+                stack = edge_stack + stack
         travel_q_LR(0, 'IdL')
 
         # now we can still have unknown edges in the case of "dead ends" in the MPO graph.
@@ -1641,8 +1692,9 @@ class MPOGraph:
         if not infinite and any([ch is None for ch in charges[-1]]):
             raise ValueError("can't determine all charges on the very right leg of the MPO!")
 
-        max_checks = sys.getrecursionlimit()  # I don't expect interactions with larger range...
-        for _ in range(max_checks):  # recursion limit would be hit in travel_q_LR first!
+        max_checks = 1000  # Hard-coded since for a properly set-up MPO graph, this loop will
+        # terminate after one iteration
+        for _ in range(max_checks):
             repeat = False
             for i in reversed(range(L)):
                 ch = charges[i]
@@ -1669,7 +1721,7 @@ class MPOGraph:
 class MPOEnvironment(MPSEnvironment):
     """Stores partial contractions of :math:`<bra|H|ket>` for an MPO `H`.
 
-    The network for a contraction :math:`<bra|H|ket>` of an MPO `H` bewteen two MPS looks like::
+    The network for a contraction :math:`<bra|H|ket>` of an MPO `H` between two MPS looks like::
 
         |     .------>-M[0]-->-M[1]-->-M[2]-->- ...  ->--.
         |     |        |       |       |                 |
@@ -1712,95 +1764,164 @@ class MPOEnvironment(MPSEnvironment):
         Should have 'IdL' and 'IdR' set on the first and last bond.
     ket : :class:`~tenpy.networks.mpo.MPS`
         The MPS on which `H` acts. May be identical with `bra`.
-    init_LP : ``None`` | :class:`~tenpy.linalg.np_conserved.Array`
-        Initial very left part ``LP``. If ``None``, build trivial one with
-        :meth`init_LP`.
-    init_RP : ``None`` | :class:`~tenpy.linalg.np_conserved.Array`
-        Initial very right part ``RP``. If ``None``, build trivial one with
-        :meth:`init_RP`.
-    age_LP : int
-        The number of physical sites involved into the contraction yielding `firstLP`.
-    age_RP : int
-        The number of physical sites involved into the contraction yielding `lastRP`.
+    **init_env_data :
+        Further keyword arguments with initializaiton data, as returned by
+        :meth:`get_initialization_data`.
+        See :meth:`initialize_first_LP_last_RP` for details on these parameters.
 
     Attributes
     ----------
     H : :class:`~tenpy.networks.mpo.MPO`
         The MPO sandwiched between `bra` and `ket`.
     """
-    def __init__(self, bra, H, ket, init_LP=None, init_RP=None, age_LP=0, age_RP=0):
-        if ket is None:
-            ket = bra
-        if ket is not bra:
-            ket._gauge_compatible_vL_vR(bra)  # ensure matching charges
-        self.bra = bra
-        self.ket = ket
+    def __init__(self, bra, H, ket, cache=None, **init_env_data):
         self.H = H
-        self.L = L = lcm(lcm(bra.L, ket.L), H.L)
-        self._finite = bra.finite
+        super().__init__(bra, ket, cache, **init_env_data)
         self.dtype = np.find_common_type([bra.dtype, ket.dtype, H.dtype], [])
-        self._LP = [None] * L
-        self._RP = [None] * L
-        self._LP_age = [None] * L
-        self._RP_age = [None] * L
-        if init_LP is None:
-            init_LP = self.init_LP(0)
-        self.set_LP(0, init_LP, age=age_LP)
-        if init_RP is None:
-            init_RP = self.init_RP(L - 1)
-        self.set_RP(L - 1, init_RP, age=age_RP)
-        self.test_sanity()
+
+    def init_first_LP_last_RP(self,
+                              init_LP=None,
+                              init_RP=None,
+                              age_LP=0,
+                              age_RP=0,
+                              start_env_sites=None):
+        """(Re)initialize first LP and last RP from the given data.
+
+        If `init_LP` and `init_RP` are not given, we try to find sensible initial values.
+        Dummy environments can by built with :meth:`init_LP` and :meth:`init_RP`, especially
+        for **finite** MPS.
+
+        For **infinite** MPS, we try to converge the environments with one of two methods:
+
+        - If `start_env_sites` is given as an integer, contract that many sites into the
+          environment from the given `init_LP` and `init_RP` or new trivial environments built
+          with :meth:`init_LP` / :meth:`init_RP`.
+        - If `start_env_sites` is None, and :attr:`bra` is :attr:`ket`,
+          get `init_LP` and `init_RP` with :meth:`MPOTransferMatrix.find_init_LP_RP`.
+
+        Parameters
+        ----------
+        init_LP, init_RP: ``None`` | :class:`~tenpy.linalg.np_conserved.Array`
+            Initial very left part ``LP`` and very right part ``RP``.
+            If ``None``, try to build (and converge) them as described above.
+        age_LP, age_RP : int
+            The number of physical sites involved into the contraction of `init_LP` and `init_RP`.
+        start_env_sites : int | None
+            Number of sites over which to converge the environment for infinite systems.
+            See above.
+        """
+        if not self._finite  and (init_LP is None or init_RP is None) and \
+                start_env_sites is None and self.bra is self.ket:
+            env_data = MPOTransferMatrix.find_init_LP_RP(self.H, self.ket, 0, self.L - 1)
+            init_LP = env_data['init_LP']
+            init_RP = env_data['init_RP']
+            start_env_sites = 0
+        if start_env_sites is None:
+            start_env_sites = 0 if self._finite else self.L
+        if self._finite and start_env_sites != 0:
+            warnings.warn("setting `start_env_sites` to 0 for finite MPS")
+            start_env_sites = 0
+        if init_LP is not None:
+            try:
+                i = -start_env_sites
+                init_LP.get_leg('wR').test_contractible(self.H.get_W(i).get_leg('wL'))
+            except ValueError:
+                logger.warning("dropping `init_LP` with incompatible MPO legs")
+                init_LP = None
+        if init_RP is not None:
+            try:
+                j = self.L - 1 + start_env_sites
+                init_RP.get_leg('wL').test_contractible(self.H.get_W(j).get_leg('wR'))
+            except ValueError:
+                logger.warning("dropping `init_RP` with incompatible MPO legs")
+                init_RP = None
+        if self.ket.bc == 'segment' and (init_LP is None or init_RP is None):
+            raise ValueError("Environments with segment b.c. need explicit environments!")
+        super().init_first_LP_last_RP(init_LP, init_RP, age_LP, age_RP, start_env_sites)
 
     def test_sanity(self):
         """Sanity check, raises ValueErrors, if something is wrong."""
         assert (self.bra.finite == self.ket.finite == self.H.finite == self._finite)
-        # check that the network is contractable
+        # check that the physical legs are contractable
         for b_s, H_s, k_s in zip(self.bra.sites, self.H.sites, self.ket.sites):
             b_s.leg.test_equal(k_s.leg)
             b_s.leg.test_equal(H_s.leg)
-        assert any([LP is not None for LP in self._LP])
-        assert any([RP is not None for RP in self._RP])
+        assert any(key in self.cache for key in self._LP_keys)
+        assert any(key in self.cache for key in self._RP_keys)
 
-    def init_LP(self, i):
-        """Build initial left part ``LP``.
+    def init_LP(self, i, start_env_sites=0):
+        r"""Build an initial left part ``LP``.
+
+        For `start_env_sites` > 0, make the assumptions that `bra` is the same as `ket`
+        and in canonical form, and that H is a Hamiltonian with the following block-form
+        (up to a permutation of MPO indices; this is the case for any model defined in TeNPy),
+
+        .. math ::
+
+            W = \begin{pmatrix} 1 & C & D  \\
+                                0 & A & B  \\
+                                0 & 0 & 1  \end{pmatrix}
+
+        Given that, we can converge the environment even in the thermodynamic limit:
+        ``LP[IdL, :, :]`` just contains the energy for the left part of the Hamiltonian,
+        contributing just a constant we can ignore (since we only look at relative energies)
+        ``LP[IdR, :, :] = eye(:, :)`` is just the MPS environment.
+        The remaining part is the harder one: we need to converge $C + CA + CAA + CAAA + ... $
+        sandwiched between the MPS. However, H often has finite range,
+        which makes `A` nil-potent, such that we only need to contract the environment a few times
+        from the left.
+
+        .. todo ::
+            Right now, for infinite/long range it just limits the number of iterations.
+            In general, we could calculate the exact $X = C + CA + CAA +...$ with the
+            geometric series by solving the set of linear equation $ X(1-A) = C$ for X,
+            (and analogously $(1-A)X = B$ for the right environment `RP`).
 
         Parameters
         ----------
         i : int
             Build ``LP`` left of site `i`.
+        start_env_sites : int
+            How many sites to contract to converge the `init_LP`; the initial `age_LP`.
 
         Returns
         -------
         init_LP : :class:`~tenpy.linalg.np_conserved.Array`
-            Identity contractible with the `vL` leg of ``.ket.get_B(i)``,
-            multiplied with a unit vector nonzero in ``H.IdL[i]``,
-            with labels ``'vR*', 'wR', 'vR'``.
+            Environment left of site `i` with labels ``'vR*', 'wR', 'vR'``.
         """
-        init_LP = super().init_LP(i)
-        leg_mpo = self.H.get_W(i).get_leg('wL').conj()
-        IdL = self.H.get_IdL(i)
+        i0 = i - start_env_sites
+        IdL = self.H.get_IdL(i0)
+        assert IdL is not None
+        init_LP = super().init_LP(i0, 0)
+        leg_mpo = self.H.get_W(i0).get_leg('wL').conj()
         init_LP = init_LP.add_leg(leg_mpo, IdL, axis=1, label='wR')
+        for j in range(i0, i):
+            init_LP = self._contract_LP(j, init_LP)
         return init_LP
 
-    def init_RP(self, i):
+    def init_RP(self, i, start_env_sites=0):
         """Build initial right part ``RP`` for an MPS/MPOEnvironment.
 
         Parameters
         ----------
         i : int
             Build ``RP`` right of site `i`.
+        start_env_sites : int
+            How many sites to contract to converge the `init_RP`; the initial `age_RP`.
 
         Returns
         -------
         init_RP : :class:`~tenpy.linalg.np_conserved.Array`
-            Identity contractible with the `vR` leg of ``self.get_B(i)``,
-            multiplied with a unit vector nonzero in ``H.IdR[i]``,
-            with labels ``'vL*', 'wL', 'vL'``.
+            Environment right of site `i` with labels ``'vL*', 'wL', 'vL'``.
         """
-        init_RP = super().init_RP(i)
-        leg_mpo = self.H.get_W(i).get_leg('wR').conj()
-        IdR = self.H.get_IdR(i)
+        i0 = i + start_env_sites
+        IdR = self.H.get_IdR(i0)
+        assert IdR is not None
+        init_RP = super().init_RP(i0, 0)
+        leg_mpo = self.H.get_W(i0).get_leg('wR').conj()
         init_RP = init_RP.add_leg(leg_mpo, IdR, axis=1, label='wL')
+        for j in range(i0, i, -1):
+            init_RP = self._contract_RP(j, init_RP)
         return init_RP
 
     def get_LP(self, i, store=True):
@@ -1889,7 +2010,10 @@ class MPOEnvironment(MPSEnvironment):
         S_ket = self.ket.get_SR(i0)
         LP = self.bra._scale_axis_B(LP, S_ket, form_diff=1., axis_B='vR', cutoff=0.)
         RP = self.get_RP(i0, store=False)
-        return npc.inner(LP, RP, axes=[['vR*', 'wR', 'vR'], ['vL*', 'wL', 'vL']], do_conj=False)
+        res = npc.inner(LP, RP, axes=[['vR*', 'wR', 'vR'], ['vL*', 'wL', 'vL']], do_conj=False)
+        if self.H.explicit_plus_hc:
+            res = res + np.conj(res)
+        return res
 
     def expectation_value(self, ops, sites=None, axes=None):
         """(doesn't make sense)"""
@@ -1914,6 +2038,215 @@ class MPOEnvironment(MPSEnvironment):
         # for a ususal MPS, axes = (['p', 'vL*'], ['p*', 'vR*'])
         RP = npc.tensordot(RP, self.bra.get_B(i, form='B').conj(), axes=axes)
         return RP  # labels 'vL', 'wL', 'vL*'
+
+
+class MPOTransferMatrix:
+    """Transfermatrix of a Hamiltonian-like MPO sandwiched between canonicalized MPS.
+
+    Given an MPS in canonical form, this class helps to find the correct initial MPO environment
+    on the left or right by diagonalizing the transfer matrix.
+    This is only needed for *infinite* range Hamiltonians; for finite range you can just use
+    :meth:`MPOEnvironment.init_first_LP_last_RP` with ``start_env_sites=H.max_range``.
+    This class **assumes** that `H` is the sum of local terms such that the transfer matrix has
+    a Jordan Block form when the MPO leg is divided into :attr:`MPO.IdL`, :attr:`MPO.IdR` and the
+    rest.
+
+    Parameters
+    ----------
+    H : :class:`~tenpy.networks.mpo.MPO`
+        The MPO sandwiched between `psi`.
+        Should have 'IdL' and 'IdR'.
+    psi : :class:`~tenpy.networks.mps.MPS`
+        The MPS to project on. Should be given in usual 'ket' form;
+        we call `conj()` on the matrices directly.
+    transpose : bool
+        Wheter `self.matvec` acts on `RP` (``False``) or `LP` (``True``).
+
+    Attributes
+    ----------
+    transpose : bool
+        Wheter `self.matvec` acts on `RP` (``True``) or `LP` (``False``).
+    dtype :
+        Common dtype of `H` and `psi`.
+    IdL, IdR : int
+        Indices of the MPO leg between unit cells, where only identities are to the left/right.
+    _M, _M_conj, _W : list of :class:`~tenpy.linalg.np_conserved.Array`
+        Tensors to be contracted into `vec` in :meth:`matvec`.
+    guess : :class:`~tenpy.linalg.np_conserved.Array`
+        Initial guess as npc Array.
+    flat_linop : :class:`~tenpy.linalg.sparse.FlatLinearOperator`
+        Wrapper to allow calling scipy sparse functions.
+    flat_guess :
+        Initial guess suitable for `flat_linop` in non-tenpy form.
+    """
+    def __init__(self, H, psi, transpose=False):
+        if psi.finite or H.bc != 'infinite':
+            raise ValueError("Only makes sense for infinite MPS")
+        if H.L != psi.L:
+            raise ValueError("Non-matching L")
+        self.L = H.L
+        if np.linalg.norm(psi.norm_test()) > 1.e-10:
+            raise ValueError("psi should be in canonical form!")
+        if psi._p_label != ['p']:
+            raise NotImplementedError("What would the MPO act on...?")
+        self.dtype = dtype = np.promote_types(psi.dtype, H.dtype)
+        self.transpose = transpose
+        self._M = []
+        self._M_conj = []
+        self._W = []
+        self.IdL = H.get_IdL(0)
+        self.IdR = H.get_IdR(-1)  # on bond between MPS unit cells
+        if self.IdL is None or self.IdR is None:
+            raise ValueError("MPO needs to have structure with IdL/IdR")
+        vL = psi.get_B(0, None).get_leg('vL')
+        vR = vL.conj()
+        wL = H.get_W(0).get_leg('wL')
+        wR = wL.conj()
+        S2 = psi.get_SL(0)**2
+        self._chi0 = vL.ind_len
+        if not transpose:  # right to left
+            # vec: vL wL vL*
+            for i in reversed(range(self.L)):
+                # optimize: transpose arrays to mostly avoid it in matvec
+                B = psi.get_B(i, 'B').astype(dtype, False)
+                self._M.append(B.transpose(['vL', 'p', 'vR']))
+                self._W.append(H.get_W(i).transpose(['p*', 'wR', 'p', 'wL']).astype(dtype, False))
+                self._M_conj.append(B.conj().itranspose(['vR*', 'p*', 'vL*']))
+            eye_R = npc.diag(1., vL, dtype=dtype, labels=['vL', 'vL*'])
+            self.guess = eye_R.add_leg(wL, self.IdR, axis=1, label='wL')  # vL wL vL*
+            self.proj = eye_R.add_leg(wL, self.IdL, axis=1, label='wL')  # vL wL vL*
+            rho = npc.diag(S2, vR, labels=['vR', 'vR*'])
+            self.proj_rho = rho.add_leg(wR, self.IdL, axis=1, label='wR')  # vR wR vR*
+        else:  # left to right
+            # vec: vR* wR vR
+            for i in range(self.L):
+                A = psi.get_B(i, 'A').astype(dtype, False)
+                self._M.append(A.transpose(['vL', 'p', 'vR']))
+                self._W.append(H.get_W(i).transpose(['wR', 'p', 'wL', 'p*']).astype(dtype, False))
+                self._M_conj.append(A.conj().itranspose(['vR*', 'p*', 'vL*']))
+            eye_L = npc.diag(1., vR.conj(), dtype=dtype, labels=['vR*', 'vR'])
+            self.guess = eye_L.add_leg(wR, self.IdL, axis=1, label='wR')  # vR* wR vR
+            self.proj = eye_L.add_leg(wR, self.IdR, axis=1, label='wR')  # vR* wR vR
+            rho = npc.diag(S2, vL.conj(), labels=['vL*', 'vL'])
+            self.proj_rho = rho.add_leg(wL, self.IdR, axis=1, label='wL')  # vL* wL vL
+        self.flat_linop, self.flat_guess = FlatLinearOperator.from_guess_with_pipe(self.matvec,
+                                                                                   self.guess,
+                                                                                   dtype=dtype)
+
+    def matvec(self, vec, project=True):
+        """One matvec-operation.
+
+        Parameters
+        ----------
+        project : bool
+            If True, project away the trace of the "IdL" part (transpose=False)
+            or "IdR" part (transpose=True), respectively, to transform the Jordan-Block structure
+            into something that is translation invariant.
+        """
+        if not self.transpose:  # right to left
+            vec.itranspose(['vL', 'wL', 'vL*'])  # shouldn't do anything
+            for Bc, W, B in zip(self._M_conj, self._W, self._M):
+                # vec: vL wL vL*
+                vec = npc.tensordot(B, vec, axes=['vR', 'vL'])  # vL p wL vL*
+                vec = npc.tensordot(vec, W, axes=[['p', 'wL'], ['p*', 'wR']])  # vL vL* p wL
+                vec = npc.tensordot(vec, Bc, axes=[['vL*', 'p'], ['vR*', 'p*']])  # vL wL vL*
+            if project:
+                # vec.itranspose(['vL', 'wL', 'vL*'])  # alreayd is in that order
+                E = npc.inner(vec, self.proj_rho, axes=[['vL', 'wL', 'vL*'], ['vR', 'wR', 'vR*']])
+                vec -= self.proj * E
+        else:
+            vec.itranspose(['vR*', 'wR', 'vR'])  # shouldn't do anything
+            for Ac, W, A in zip(self._M_conj, self._W, self._M):
+                vec = npc.tensordot(vec, A, axes=['vR', 'vL'])  # vR* wR p vR
+                vec = npc.tensordot(W, vec, axes=[['wL', 'p*'], ['wR', 'p']])  # wR p vR* vR
+                vec = npc.tensordot(Ac, vec, axes=[['p*', 'vL*'], ['p', 'vR*']])  # vR* wR vR
+            if project:
+                E = npc.inner(vec, self.proj_rho, axes=[['vR*', 'wR', 'vR'], ['vL*', 'wL', 'vL']])
+                vec -= self.proj * E
+        return vec
+
+    def dominant_eigenvector(self, **kwargs):
+        """Find dominant eigenvector of self using :mod:`scipy.sparse`.
+
+        Parameters
+        ----------
+        **kwargs :
+            Keyword arguments for :meth:`~tenpy.linalg.sparse.FlatLinearOperator.eigenvectors`.
+
+        Returns
+        -------
+        val : float
+            Eigenvalue for the transfer matrix; should be (very) close to 1.
+        vec :
+            Eigenvector to be used as initial LP/RP for an :class:`MPOEnvironment`.
+        """
+        if 'v0_npc' not in kwargs:
+            kwargs.setdefault('v0', self.flat_guess)
+        vals, vecs = self.flat_linop.eigenvectors(**kwargs)
+        val = vals[0]
+        v0 = vecs[0]
+        v0 = v0.split_legs()
+        norm = npc.inner(self.guess, v0, axes='range', do_conj=True) / self._chi0
+        return val, v0 / norm
+
+    def energy(self, dom_vec):
+        """Given the dominant eigenvector, calculate the energy per MPS site.
+
+        **Assumes** that `dominant_vec` is the result of :meth:`dominant_eigenvector`.
+
+        Returns
+        -------
+        energy : float
+            Energy per site of the MPS.
+        """
+        vec = self.matvec(dom_vec, project=False)
+        if not self.transpose:
+            E = npc.inner(vec, self.proj_rho, axes=[['vL', 'wL', 'vL*'], ['vR', 'wR', 'vR*']])
+        else:
+            E = npc.inner(vec, self.proj_rho, axes=[['vR*', 'wR', 'vR'], ['vL*', 'wL', 'vL']])
+        return E / self.L
+
+    @classmethod
+    def find_init_LP_RP(cls, H, psi, first=0, last=None, calc_E=False, tol_ev0=1.e-8):
+        """Find the initial LP and RP.
+
+        Parameters
+        ----------
+        H, psi :
+            MPO and MPS, see class docstring.
+        calc_E : bool
+            Wether to calculate and return the energy.
+
+        Returns
+        -------
+        init_env_data : dict
+            Dictionary with `init_LP` and `init_RP` that can be given to :class:`MPOEnvironment`.
+        E : float
+            Energy per site. Only returned if `calc_E` is True.
+        """
+        # first right to left
+        envs, Es = [], []
+        for transpose in [False, True]:
+            TM = cls(H, psi, transpose=transpose)
+            val, vec = TM.dominant_eigenvector()
+            if abs(1. - val) > tol_ev0:
+                logger.warning("MPOTransferMatrix eigenvalue not 1: got 1. - %.3e", 1. - val)
+            envs.append(vec)
+            if calc_E and transpose:
+                E = TM.energy(vec)
+            del TM
+        init_env_data = {'init_LP': envs[1], 'init_RP': envs[0]}
+        if first != 0 or last is not None:
+            env = MPOEnvironment(psi, H, psi, **init_env_data)
+            L = env.L
+            if first % L != 0:
+                init_env_data['init_LP'] = env.get_LP(first, store=False)
+            if last % L != L - 1:
+                init_env_data['init_RP'] = env.get_RP(last, store=False)
+        if calc_E:
+            return E, init_env_data
+        # else:
+        return init_env_data
 
 
 def grid_insert_ops(site, grid):

@@ -360,7 +360,7 @@ class FlatLinearOperator(ScipyLinearOperator):
         else:
             chi2 = self.leg.ind_len
             self.shape = (chi2, chi2)
-            self._mask = np.ones([chi2], dtype=np.bool)
+            self._mask = np.ones([chi2], dtype=np.bool_)
 
     def _matvec(self, vec):
         """Matvec operation acting on a numpy ndarray of the selected charge sector.
@@ -667,7 +667,7 @@ class FlatLinearOperator(ScipyLinearOperator):
                     qtotal = self.leg.get_charge(qi)
                     vecs[j] = npc.Array.from_ndarray(A[:, j], **from_ndarray_args, qtotal=qtotal)
                 else:
-                    used_blocks = {}
+                    used_blocks = set()
                     for j in degenerate:
                         vec = A[:, j]
                         block_norms = [

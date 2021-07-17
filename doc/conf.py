@@ -87,8 +87,14 @@ exclude_patterns = [
 def create_example_stubs():
     """create stub files for examples and toycodes to include them in the documentation."""
     folders = {
-        'examples': os.listdir(os.path.join(REPO_PREFIX, 'examples')),
-        'toycodes': os.listdir(os.path.join(REPO_PREFIX, 'toycodes'))
+        'examples':
+        os.listdir(os.path.join(REPO_PREFIX, 'examples')),
+        os.path.join('examples', 'advanced'):
+        os.listdir(os.path.join(REPO_PREFIX, 'examples', 'advanced')),
+        os.path.join('examples', 'chern_insulators'):
+        os.listdir(os.path.join(REPO_PREFIX, 'examples', 'chern_insulators')),
+        'toycodes':
+        os.listdir(os.path.join(REPO_PREFIX, 'toycodes'))
     }
     for key, files in folders.items():
         outdir = os.path.join(os.path.dirname(__file__), key)
@@ -148,7 +154,7 @@ html_context = {
     "conf_py_path":
     "/doc/",  # Path in the checkout to the docs root
     "css_files": [
-        "_static/custom_highlight.css",  # to highlight targets
+        "_static/custom.css",  # to highlight targets
         "_static/copybutton.css",  # somehow this didn't get included otherwise
     ],
 }
@@ -228,7 +234,7 @@ inheritance_graph_attrs = {
 # this makes  e.g. :class:`numpy.ndarray` work
 intersphinx_mapping = {
     'python': ('https://docs.python.org/3', None),
-    'numpy': ('https://docs.scipy.org/doc/numpy', None),
+    'numpy': ('https://numpy.org/doc/stable', None),
     'scipy': ('https://docs.scipy.org/doc/scipy/reference/', None),
     'matplotlib': ('https://matplotlib.org', None),
     'h5py': ('https://docs.h5py.org/en/stable/', None),

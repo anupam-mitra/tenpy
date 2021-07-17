@@ -75,6 +75,16 @@ import numpy as np
 import importlib
 import warnings
 import sys
+try:
+    from packaging.version import parse as parse_version
+except:
+    try:
+        from setuptools._vendor.packaging.version import parse as parse_version
+    except ImportError:
+
+        def parse_version(version_str):
+            return version_str.split('.')  # bad but better than nothing
+
 
 try:
     import h5py
@@ -686,7 +696,12 @@ class Hdf5Saver:
         self.save(obj.descr, subpath + 'descr')
         return h5gr
 
-    dispatch_save[np.dtype] = (save_dtype, REPR_DTYPE)
+    if parse_version(np.__version__) < parse_version('1.20.0'):
+        dispatch_save[np.dtype] = (save_dtype, REPR_DTYPE)
+    else:
+        # numpy version 1.20 introduced separate subclasses of dtype for the standard types
+        for t in np.dtype.__subclasses__():
+            dispatch_save[t] = (save_dtype, REPR_DTYPE)
 
     def save_ignored(self, obj, path, type_repr):
         """Don't save the Hdf5Ignored object; just return None."""

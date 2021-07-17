@@ -17,10 +17,11 @@ See also the :doc:`/intro/model` and :doc:`/intro/lattices`.
 import numpy as np
 import itertools
 import warnings
+import copy
 
 from ..networks.site import Site
-from ..tools.misc import (to_iterable, to_iterable_of_len, inverse_permutation, get_close,
-                          find_subclass)
+from ..tools.misc import (to_iterable, to_array, to_iterable_of_len, inverse_permutation,
+                          get_close, find_subclass)
 from ..networks.mps import MPS  # only to check boundary conditions
 
 __all__ = [
@@ -68,7 +69,7 @@ class Lattice:
     unit_cell : list of :class:`~tenpy.networks.site.Site`
         The sites making up a unit cell of the lattice.
         If you want to specify it only after initialization, use ``None`` entries in the list.
-    order : str | ``('standard', snake_winding, priority)`` | ``('grouped', groups)``
+    order : str | ``('standard', snake_winding, priority)`` | ``('grouped', groups, ...)``
         A string or tuple specifying the order, given to :meth:`ordering`.
     bc : (iterable of) {'open' | 'periodic' | int}
         Boundary conditions in each direction of the lattice.
@@ -132,6 +133,8 @@ class Lattice:
         for each site in the unit cell a vector giving its position within the unit cell.
     pairs : dict
         See above.
+    segement_first_last : tuple of int
+        The `first` and `last` MPS sites for "segment" :attr:`bc_MPS`; not set otherwise.
     _order : ndarray (N_sites, dim+1)
         The place where :attr:`order` is stored.
     _strides : ndarray (dim, )
@@ -198,7 +201,7 @@ class Lattice:
             assert self.N_cells == np.prod(self.Ls)
         if self.bc.shape != (self.dim, ):
             raise ValueError("Wrong len of bc")
-        assert self.bc.dtype == np.bool
+        assert self.bc.dtype == bool
         chinfo = None
         for site in self.unit_cell:
             if not isinstance(site, Site):
@@ -228,6 +231,10 @@ class Lattice:
             # rows of `order` unique and _perm correct?
             assert np.all(
                 np.sum(self._order * self._strides, axis=1)[self._perm] == np.arange(self.N_sites))
+
+    def copy(self):
+        """Shallow copy of `self`."""
+        return copy.copy(self)
 
     def save_hdf5(self, hdf5_saver, h5gr, subpath):
         """Export `self` into a HDF5 file.
@@ -261,6 +268,10 @@ class Lattice:
         # not necessary for loading, but still usefull
         h5gr.attrs["dim"] = self.dim
         h5gr.attrs["N_sites"] = self.N_sites
+        if hasattr(self, 'segement_first_last'):
+            first, last = self.segment_first_last
+            h5gr.attrs['segment_first'] = first
+            h5gr.attrs['segment_last'] = last
 
     @classmethod
     def from_hdf5(cls, hdf5_loader, h5gr, subpath):
@@ -294,7 +305,10 @@ class Lattice:
         obj.bc_MPS = hdf5_loader.load(subpath + "boundary_condition_MPS")
         obj.order = hdf5_loader.load(subpath + "order_for_MPS")  # property setter!
         obj.pairs = hdf5_loader.load(subpath + "pairs")
-
+        if 'segment_first' in h5gr.attrs:
+            first = h5gr.attrs['segment_first']
+            last = h5gr.attrs['segment_last']
+            obj.segment_first_last = first, last
         obj.test_sanity()
         return obj
 
@@ -376,7 +390,7 @@ class Lattice:
 
         Parameters
         ----------
-        order : str | ``('standard', snake_winding, priority)`` | ``('grouped', groups)``
+        order : str | ``('standard', snake_winding, priority)`` | ``('grouped', groups, ...)``
             Specifies the desired ordering using one of the strings of the above tables.
             Alternatively, an ordering is specified by a tuple with first entry specifying a
             function, ``'standard'`` for :func:`get_order` and ``'grouped'`` for
@@ -414,9 +428,9 @@ class Lattice:
         else:
             descr = order[0]
             if descr == 'standard':
-                snake_winding, priority = order[1], order[2]
+                snake_winding, priority = order[1:]
             elif descr == 'grouped':
-                return get_order_grouped(self.shape, order[1])
+                return get_order_grouped(self.shape, *order[1:])
             else:
                 raise ValueError("unknown ordering " + repr(order))
         return get_order(self.shape, snake_winding, priority)
@@ -459,6 +473,51 @@ class Lattice:
             if not np.any(self.bc_shift != 0):
                 self.bc_shift = None
         self.bc = np.array(bc)
+
+    def extract_segment(self, first=0, last=None, enlarge=None):
+        """Extract a finite segment from an infinite/large system.
+
+        Parameters
+        ----------
+        first, last : int
+            The first and last site to *include* into the segment.
+            `last` defaults to :attr:`L` - 1, i.e., the MPS unit cell for infinite MPS.
+        enlarge : int
+            Instead of specifying the `first` and `last` site, you can specify this factor
+            by how much the MPS unit cell should be enlarged.
+
+        Returns
+        -------
+        copy : :class:`Lattice`
+            A copy of `self` with "segment" :attr:`bc_MPS` and :attr:`segment_first_last` set.
+        """
+        cp = self.copy()
+        L = cp.N_sites
+        assert first >= 0
+        if enlarge is not None:
+            if cp.bc_MPS != 'infinite':
+                raise ValueError("enlarge only possible for infinite MPS")
+            if last is not None or first != 0:
+                raise ValueError("specifiy either `first`+`last` or `enlarge`!")
+            assert enlarge > 0
+            last = enlarge * L - 1
+        elif last is None:
+            last = L - 1
+            enlarge = 1
+        else:
+            enlarge = last + 1 // L
+        assert enlarge > 0
+        if enlarge > 1:
+            cp.enlarge_mps_unit_cell(enlarge)
+        if first >= last:
+            raise ValueError(f"need first < last, got {first:d}, {last:d}")
+        if first > 0 or last < cp.N_sites - 1:
+            # take out some parts of the lattice
+            remove = list(range(0, first)) + list(range(last + 1, cp.N_sites))
+            cp = IrregularLattice(cp, remove=remove)
+        cp.bc_MPS = 'segment'
+        cp.segment_first_last = first, last
+        return cp
 
     def enlarge_mps_unit_cell(self, factor=2):
         """Repeat the unit cell for infinite MPS boundary conditions; in place.
@@ -950,7 +1009,7 @@ class Lattice:
         shift_strength = [min(0, dxa) for dxa in dx]
         return tuple(shape), np.array(shift_strength)
 
-    def possible_couplings(self, u1, u2, dx):
+    def possible_couplings(self, u1, u2, dx, strength=None):
         """Find possible MPS indices for two-site couplings.
 
         For periodic boundary conditions (``bc[a] == False``)
@@ -965,21 +1024,34 @@ class Lattice:
             :meth:`~tenpy.models.model.CouplingModel.add_coupling`
         dx : array
             Length :attr:`dim`. The translation in terms of basis vectors for the coupling.
+        strength : array_like | None
+            If given, instead of returning `lat_indices` and `coupling_shape`
+            directly return the correct `strength_12`.
 
         Returns
         -------
-        mps1, mps2 : array
+        mps1, mps2 : 1D array
             For each possible two-site coupling the MPS indices for the `u1` and `u2`.
+        strength_vals : 1D array
+            (Only returend if `strength` is not None.)
+            Such that ``for (i, j, s) in zip(mps1, mps2, strength_vals):`` iterates over all
+            possible couplings with `s` being the strength of that coupling.
+            Couplings where ``strength_vals == 0.`` are filtered out.
         lat_indices : 2D int array
+            (Only returend if `strength` is None.)
             Rows of `lat_indices` correspond to entries of `mps1` and `mps2` and contain the
             lattice indices of the "lower left corner" of the box containing the coupling.
         coupling_shape : tuple of int
+            (Only returend if `strength` is None.)
             Len :attr:`dim`. The correct shape for an array specifying the coupling strength.
             `lat_indices` has only rows within this shape.
         """
         coupling_shape, shift_lat_indices = self.coupling_shape(dx)
         if any([s == 0 for s in coupling_shape]):
-            return [], [], np.zeros([0, self.dim]), coupling_shape
+            if strength is None:
+                return [], [], np.zeros([0, self.dim]), coupling_shape
+            else:
+                return [], [], np.array([])
         Ls = np.array(self.Ls)
         mps_i, lat_i = self.mps_lat_idx_fix_u(u1)
         lat_j_shifted = lat_i + dx
@@ -1001,10 +1073,17 @@ class Lattice:
             mps_j_shift = (lat_j_shifted[:, 0] - lat_j[:, 0]) * self.N_sites // self.N_rings
             mps_j += mps_j_shift
             # finally, ensure 0 <= min(i, j) < N_sites.
+            # (so far, 0 <= mps_i < N_sites)
             mps_ij_shift = np.where(mps_j_shift < 0, -mps_j_shift, 0)
             mps_i += mps_ij_shift
             mps_j += mps_ij_shift
-        return mps_i, mps_j, lat_indices, coupling_shape
+        if strength is None:
+            return mps_i, mps_j, lat_indices, coupling_shape
+        else:
+            strength = to_array(strength, coupling_shape)  # tile to correct shape
+            strength_vals = strength[tuple(lat_indices.T)]
+            keep_nonzero = (strength_vals != 0.)  # filter out couplings with strength 0
+            return mps_i[keep_nonzero], mps_j[keep_nonzero], strength_vals[keep_nonzero]
 
     def _keep_possible_couplings(self, lat_j, lat_j_shifted, u2):
         """filter possible j sites of a coupling from :meth:`possible_couplings`"""
@@ -1045,7 +1124,7 @@ class Lattice:
             shift_strength[a] = min_dx  # note: can be positive!
         return tuple(shape), np.array(shift_strength)
 
-    def possible_multi_couplings(self, ops):
+    def possible_multi_couplings(self, ops, strength=None):
         """Generalization of :meth:`possible_couplings` to couplings with more than 2 sites.
 
         Parameters
@@ -1061,10 +1140,17 @@ class Lattice:
             The positions are defined by `dx` (j,k,l,... relative to `i`) and boundary coundary
             conditions of `self` (how much the `box` for given `dx` can be shifted around without
             hitting a boundary - these are the different rows).
+        strength_vals : 1D array
+            (Only returend if `strength` is not None.)
+            Such that ``for  (ijkl, s) in zip(mps_ijkl, strength_vals):`` iterates over all
+            possible couplings with `s` being the strength of that coupling.
+            Couplings where ``strength_vals == 0.`` are filtered out.
         lat_indices : 2D int array
+            (Only returend if `strength` is None.)
             Rows of `lat_indices` correspond to rows of `mps_ijkl` and contain the lattice indices
             of the "lower left corner" of the box containing the coupling.
         coupling_shape : tuple of int
+            (Only returend if `strength` is None.)
             Len :attr:`dim`. The correct shape for an array specifying the coupling strength.
             `lat_indices` has only rows within this shape.
         """
@@ -1077,7 +1163,10 @@ class Lattice:
         u = np.array([op_u for _, op_dx, op_u in ops], dtype=np.int_).reshape([1, Nops, 1])
         coupling_shape, shift_lat_indices = self.multi_coupling_shape(dx[0, :, :])
         if any([s == 0 for s in coupling_shape]):
-            return [], [], coupling_shape
+            if strength is None:
+                return [], [], coupling_shape
+            else:
+                return [], np.array([])
         lat_indices = np.indices(coupling_shape).reshape([1, self.dim, -1]).transpose([2, 0, 1])
         lat_ijkl_shifted = lat_indices + (dx - shift_lat_indices)
         lat_ijkl = np.mod(lat_ijkl_shifted, Ls)
@@ -1091,10 +1180,20 @@ class Lattice:
         u = np.broadcast_to(u, lat_ijkl.shape[:2] + (1, ))
         mps_ijkl = self.lat2mps_idx(np.concatenate([lat_ijkl, u], axis=2))
         if self.bc_MPS == 'infinite':
+            # shift by whole MPS unit cells for couplings along the infinite direction
             # N_sites_per_ring might not be set for IrregularLattice
             mps_ijkl += ((lat_ijkl_shifted[keep, :, 0] - lat_ijkl[:, :, 0]) * self.N_sites //
                          self.N_rings)
-        return mps_ijkl, lat_indices, coupling_shape
+            # but ensure that  0 <= min(i,j,...) < N_sites
+            min_ijkl = np.min(mps_ijkl, axis=1)
+            mps_ijkl += (np.mod(min_ijkl, self.N_sites) - min_ijkl)[:, np.newaxis]
+        if strength is None:
+            return mps_ijkl, lat_indices, coupling_shape
+        else:
+            strength = to_array(strength, coupling_shape)  # tile to correct shape
+            strength_vals = strength[tuple(lat_indices.T)]  # extract correct entries
+            keep_nonzero = (strength_vals != 0.)  # filter out couplings with strength 0
+            return mps_ijkl[keep_nonzero], strength_vals[keep_nonzero]
 
     def _keep_possible_multi_couplings(self, lat_ijkl, lat_ijkl_shifted, u_ijkl):
         """Filter possible couplings from :meth:`possible_multi_couplings`"""
@@ -1649,7 +1748,11 @@ class HelicalLattice(Lattice):
                              "For finite systems, just take a regular lattice!")
         assert regular_lattice.bc[1] == bc_choices['periodic']  # require cylinder
         if N_unit_cells > regular_lattice.N_cells:
-            raise ValueError("N_unit_cells larger than regular lattice: increase Lx!")
+            raise ValueError("N_unit_cells larger than regular_lattice.N_cells: "
+                             "increase Lx of regular_lattice!")
+        if regular_lattice.N_cells % N_unit_cells != 0:
+            raise ValueError("N_unit_cells incommensurate with regular_lattice.N_cells: "
+                             "increase Lx of regular_lattice!")
         self._N_cells = N_unit_cells
         Lattice.__init__(
             self,
@@ -1726,7 +1829,6 @@ class HelicalLattice(Lattice):
             mps_fix_u = np.nonzero(order_[:, -1] == u)[0]
             self._mps_fix_u.append(mps_fix_u)
         self._mps_fix_u = tuple(self._mps_fix_u)
-        _, counts = np.unique(order_[:, 0], return_counts=True)
 
     # the regular lattice has the same order for the MPS,
     # only the division into unit cells is different
@@ -1750,24 +1852,65 @@ class HelicalLattice(Lattice):
 
     def enlarge_mps_unit_cell(self, factor=2):
         # doc: see Lattice
-        if self._N_cells * factor > self.regular_lattice.N_cells:
+        if (self._N_cells * factor > self.regular_lattice.N_cells
+                or self.regular_lattice.N_cells % (self._N_cells * factor) != 0):
             self.regular_lattice.enlarge_mps_unit_cell(factor)
         self._N_cells = factor * self._N_cells
-        super().enlarge_mps_unit_cell()
+
+        self._set_Ls(self.regular_lattice.Ls)
+        order_reg = self.regular_lattice.order
+        self.order = self._ordering_helical(order_reg)  # use property setter
+        self.test_sanity()
+
 
     # strategy for possible_[multi_]couplings:
     # since everything is translation invariant along the MPS, we can just extract it
     # from the couplings of the larger lattice
+    # by restricting to 0 <= min(i,j,...) < self.N_sites
+    # instead of the `0 <= min(i,j,...) < self.regular_lattice.N_sites`
+    # guaranteed by self.possible_[multi_]couplings
 
-    def possible_couplings(self, u1, u2, dx):
-        mps_i, mps_j, lat_ind, coupl_sh = self.regular_lattice.possible_couplings(u1, u2, dx)
-        keep = np.min([mps_i, mps_j], axis=0) < self.N_sites
-        return mps_i[keep], mps_j[keep], lat_ind[keep], coupl_sh
+    def possible_couplings(self, u1, u2, dx, strength=None):
+        reg = self.regular_lattice
+        if strength is None:
+            mps_i, mps_j, lat_ind, coupl_sh = reg.possible_couplings(u1, u2, dx)
+            keep = (np.min([mps_i, mps_j], axis=0) < self.N_sites)
+            return mps_i[keep], mps_j[keep], lat_ind[keep], coupl_sh
+        else:
+            mps_i, mps_j, strength_vals = reg.possible_couplings(u1, u2, dx, strength)
+            # we can actually check that everything is translation invariant!
+            self._check_transl_invar_strength(np.stack([mps_i, mps_j]).T, strength_vals)
+            keep = (np.min([mps_i, mps_j], axis=0) < self.N_sites)
+            return mps_i[keep], mps_j[keep], strength_vals[keep]
 
-    def possible_multi_couplings(self, ops):
-        mps_ijkl, lat_indices, coupling_shape = self.regular_lattice.possible_multi_couplings(ops)
-        keep = np.min(mps_ijkl, axis=1) < self.N_sites
-        return mps_ijkl[keep, :], lat_indices[keep, :], coupling_shape
+    def possible_multi_couplings(self, ops, strength=None):
+        reg = self.regular_lattice
+        if strength is None:
+            mps_ijkl, lat_inds, coupl_shape = reg.possible_multi_couplings(ops)
+            keep = np.min(mps_ijkl, axis=1) < self.N_sites
+            return mps_ijkl[keep, :], lat_inds[keep, :], coupl_shape
+        else:
+            mps_ijkl, strength_vals = reg.possible_multi_couplings(ops, strength)
+            # we can actually check that everything is translation invariant!
+            self._check_transl_invar_strength(mps_ijkl, strength_vals)
+            keep = (np.min(mps_ijkl, axis=1) < self.N_sites)
+            return mps_ijkl[keep, :], strength_vals[keep]
+
+    def _check_transl_invar_strength(self, mps_ijkl, strength_vals):
+        sort = np.lexsort(mps_ijkl.T)
+        mps_ijkl = mps_ijkl[sort]
+        strength_vals = strength_vals[sort]
+        min_ijkl = np.min(mps_ijkl, axis=1)
+        for cell_start in range(0, self.regular_lattice.N_sites, self.N_sites):
+            keep_cell = np.logical_and(cell_start <= min_ijkl,
+                                       min_ijkl < cell_start + self.N_sites)
+            if cell_start == 0:
+                ijkl_compare = mps_ijkl[keep_cell]
+                strength_compare = strength_vals[keep_cell]
+            else:
+                assert np.all(mps_ijkl[keep_cell] - cell_start == ijkl_compare)
+                if not np.all(np.abs(strength_vals[keep_cell] - strength_compare) < 1e-10):
+                    raise ValueError("Not translation invariant: can't use HelicalLattice")
 
     # most plot_* functions work, except:
 
@@ -2225,19 +2368,17 @@ def get_lattice(lattice_name):
 
     Parameters
     ----------
-    lattice_name : str
+    lattice_name : str | type
         Name of a :class:`Lattice` class defined in the module :mod:`~tenpy.models.lattice`,
         for example ``"Chain", "Square", "Honeycomb", ...``.
+        Alternatively, instead of the name directly the class itself can be given.
 
     Returns
     -------
     LatticeClass : :class:`Lattice`
         The lattice class (type, not instance) specified by `lattice_name`.
     """
-    LatticeClass = find_subclass(Lattice, lattice_name)
-    if LatticeClass is None:
-        raise ValueError("No Lattice of the given name {0!r} found!".format(lattice_name))
-    return LatticeClass
+    return find_subclass(Lattice, lattice_name)
 
 
 def get_order(shape, snake_winding, priority=None):
@@ -2320,7 +2461,7 @@ def get_order(shape, snake_winding, priority=None):
     return order
 
 
-def get_order_grouped(shape, groups):
+def get_order_grouped(shape, groups, priority=None):
     """Variant of :func:`get_order`, grouping some sites of the unit cell.
 
     This function is usefull for lattices with a unit cell of more than 2 sites (e.g. Kagome).
@@ -2338,14 +2479,15 @@ def get_order_grouped(shape, groups):
         fig, axes = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(8, 6))
         groups = [[(0, 1, 2)], [(0, 2, 1)],
                 [(0, 1), (2,)], [(0, 2), (1,)]]
+        priorities = [None, None, None, [1, 0, 2]]
         lat = lattice.Kagome(3, 3, None, bc='periodic')
-        for gr, ax in zip(groups, axes.flatten()):
-            order = lattice.get_order_grouped(lat.shape, gr)
+        for gr, prio, ax in zip(groups, priorities, axes.flatten()):
+            order = lattice.get_order_grouped(lat.shape, gr, prio)
             lat.order = order
             lat.plot_order(ax, linestyle=':')
             lat.plot_sites(ax)
             lat.plot_basis(ax, origin=-0.25*(lat.basis[0] + lat.basis[1]))
-            ax.set_title('("grouped", ' + str(gr) + ')')
+            ax.set_title(', '.join(['("grouped"', str(gr), str(prio) + ')']))
             ax.set_aspect('equal')
             ax.set_xlim(-1)
             ax.set_ylim(-1)
@@ -2360,10 +2502,17 @@ def get_order_grouped(shape, groups):
     shape : tuple of int
         The shape of the lattice, i.e., the length in each direction.
     groups : tuple of tuple of int
-        A partition and reordering of range(shape[-1]) into smaller groups.
+        A partition and reordering of ``range(shape[-1])`` into smaller groups.
         The ordering goes first within a group, then along the last spatial dimensions, then
         changing between different groups and finally in Cstyle order along the remaining spatial
         dimensions.
+    priority : None | tuple of ints
+        By default (`None`), use C-style order for everything except the unit cell, as shown above.
+        If a tuple, it should have length ``len(shape)`` and specifies which order to go first,
+        similarly as in :func:`get_order`. To group sites in the unit cell, you should make the
+        last entry of `priority` the largest. However, you can also choose to group along another
+        direction - in that case `groups` should be a partitioning of
+        ``range(shape(argmax(priority)))``. Try and plot it, if you need it!
 
     Returns
     -------
@@ -2375,6 +2524,14 @@ def get_order_grouped(shape, groups):
     :meth:`Lattice.ordering` : method in :class:`Lattice` to obtain the order from parameters.
     :meth:`Lattice.plot_order` : visualizes the resulting order in a :class:`Lattice`.
     """
+    if priority is not None:
+        # reduce this case to C-style order and a few permutations
+        perm = np.argsort(priority)
+        inv_perm = inverse_permutation(perm)
+        transp_shape = np.array(shape)[perm]
+        order = get_order_grouped(transp_shape, groups, None)  # in plain C-style
+        order = order[:, inv_perm]
+        return order
     Ly = shape[-2]
     Lu = shape[-1]
     N_sites = np.prod(shape)
